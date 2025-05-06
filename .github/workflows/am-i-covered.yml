@@ -17,37 +17,39 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set matrix with path mapping
-        id: set-matrix
+      - name: Build and push image to Artifact Registry
+        id: build
         run: |
           set -e
-          declare -A SERVICE_PATH_MAP=(
-            ["langfuse"]="src/services/langfuse"
-            ["llm"]="src/services/llm"
-          )
-          SERVICES=("langfuse" "llm")
-          if [ -n "$INPUT_SERVICE" ]; then
-            if [[ -z "${SERVICE_PATH_MAP[$INPUT_SERVICE]}" ]]; then
-              echo "ERROR: Invalid service name '${INPUT_SERVICE}'."
-              exit 1
-            fi
-            SELECTED="{\"service\": \"${INPUT_SERVICE}\", \"dockerfile\": \"${SERVICE_PATH_MAP[$INPUT_SERVICE]}\"}"
-            MATRIX="[${SELECTED}]"
+      
+          REGION="${{ secrets.GCP_REGION }}"
+          PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+          REPOSITORY="${{ secrets.GCP_REPOSITORY }}"
+          SERVICE_NAME="amicovered-${{ matrix.service }}"
+          IMAGE_NAME="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE_NAME}"
+      
+          # Get commit message (fallback if unavailable)
+          COMMIT_MSG=$(git log -1 --pretty=%s -- $(dirname "${{ matrix.dockerfile }}") || echo "manual-build")
+      
+          # Sanitize tag to make it Docker-safe
+          TAG=$(echo "$COMMIT_MSG" | tr ' ' '-' | tr -cd '[:alnum:]-' | cut -c1-50)
+          if [ -z "$TAG" ]; then
+            TAG="build-$(git rev-parse --short HEAD)"
           else
-            MATRIX="["
-            for service in "${SERVICES[@]}"; do
-              path="${SERVICE_PATH_MAP[$service]}"
-              if [ -n "$path" ]; then
-                MATRIX="${MATRIX}{\"service\": \"${service}\", \"dockerfile\": \"${path}\"},"
-              fi
-            done
-            MATRIX="${MATRIX%,}]"
+            TAG="${TAG}-$(git rev-parse --short HEAD)"
           fi
-          echo "Final Matrix JSON: $MATRIX"  
-          ##########
-          printf "matrix={\"include\":%s}\n" "$MATRIX" >> "$GITHUB_OUTPUT"
-        env:
-          INPUT_SERVICE: ${{ github.event.inputs.service }}
+      
+          echo "Building image: ${IMAGE_NAME}:${TAG}"
+          BUILD_CONTEXT=$(dirname "${{ matrix.dockerfile }}")
+          docker build -t "${IMAGE_NAME}:${TAG}" -f "${{ matrix.dockerfile }}" "${BUILD_CONTEXT}"
+          docker push "${IMAGE_NAME}:${TAG}"
+      
+          # Output tag to be used by next step
+          echo "image_tag=${IMAGE_NAME}:${TAG}" >> "$GITHUB_OUTPUT"
+      
+      - name: Expose image tag
+        run: echo "Image tag built: ${{ steps.build.outputs.image_tag }}"
+
 
   build:
     needs: determine-services
