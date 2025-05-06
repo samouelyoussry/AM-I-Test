@@ -84,24 +84,33 @@ jobs:
       - name: Build and push image to Artifact Registry
         run: |
           set -e
-          IMAGE_NAME=${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_REPOSITORY }}/amicovered-${{ matrix.service }}
-
-          COMMIT_MSG=$(git log -1 --pretty=%s -- $(dirname "${{ matrix.dockerfile }}"))
+      
+          REGION="${{ secrets.GCP_REGION }}"
+          PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+          REPOSITORY="${{ secrets.GCP_REPOSITORY }}"
+          SERVICE_NAME="amicovered-${{ matrix.service }}"
+          IMAGE_NAME="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE_NAME}"
+      
+          COMMIT_MSG=$(git log -1 --pretty=%s -- $(dirname "${{ matrix.dockerfile }}") || echo "manual-build")
           TAG=$(echo "$COMMIT_MSG" | tr ' ' '-' | tr -cd '[:alnum:]-' | cut -c1-50)
+      
           if [ -z "$TAG" ]; then
             TAG="build-$(git rev-parse --short HEAD)"
           else
-            TAG="$TAG-$(git rev-parse --short HEAD)"
+            TAG="${TAG}-$(git rev-parse --short HEAD)"
           fi
-
-          echo "Building image: $IMAGE_NAME:$TAG"
+      
+          echo "Building image: ${IMAGE_NAME}:${TAG}"
           BUILD_CONTEXT=$(dirname "${{ matrix.dockerfile }}")
-          docker build -t $IMAGE_NAME:$TAG -f ${{ matrix.dockerfile }} $BUILD_CONTEXT
-          docker push $IMAGE_NAME:$TAG
-
+          docker build -t ${IMAGE_NAME}:${TAG} -f ${{ matrix.dockerfile }} ${BUILD_CONTEXT}
+          docker push ${IMAGE_NAME}:${TAG}
+      
+          # Save image tag as GitHub Actions output
+          echo "image_tag=${IMAGE_NAME}:${TAG}" >> $GITHUB_OUTPUT
+      
       - name: Expose image tag
         id: tag
-        run: echo "image_tag=$IMAGE_NAME:$TAG" >> "$GITHUB_OUTPUT"
+        run: echo "image_tag=${{ steps.build.outputs.image_tag }}" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Deploy to GCP Cloud Run
