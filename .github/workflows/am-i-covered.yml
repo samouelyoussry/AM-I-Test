@@ -43,8 +43,9 @@ jobs:
             done
             MATRIX="${MATRIX%,}]"
           fi
-          echo "Final Matrix JSON: $MATRIX"
-          printf "matrix=%s\n" "$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Final Matrix JSON: $MATRIX"  
+          ##########
+          printf "matrix={\"include\":%s}\n" "$MATRIX" >> "$GITHUB_OUTPUT"
         env:
           INPUT_SERVICE: ${{ github.event.inputs.service }}
 
