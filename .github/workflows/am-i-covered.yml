@@ -75,7 +75,8 @@ jobs:
       ### CHANGED FOR GCP: Configure Docker for Artifact Registry
       - name: Configure Docker for GCP Artifact Registry
         run: |
-          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
+          gcloud auth configure-docker us-central1-docker.pkg.dev
+
 
       - name: Build and push image to Artifact Registry
         run: |
