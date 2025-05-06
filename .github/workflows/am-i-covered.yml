@@ -1,6 +1,5 @@
-name: Am I Covered Workflow
+name: Am I Covered Workflow (GCP Version)
 
-# Trigger workflow manually 
 on:
   workflow_dispatch:
     inputs:
@@ -10,205 +9,137 @@ on:
         default: ''
 
 jobs:
-  # First Job: Determine which services to build, and their Dockerfile paths
   determine-services:
     runs-on: ubuntu-latest
     outputs:
-      # Output matrix for next job
       matrix: ${{ steps.set-matrix.outputs.matrix }}
-
     steps:
-      # Step 1: Checkout repository 
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Step 2: Create a matrix of services to build, mapping service name to its Dockerfile path
       - name: Set matrix with path mapping
         id: set-matrix
         run: |
-          # Exit on error
           set -e
-
-          # Map service names to their actual Dockerfile paths
-
           declare -A SERVICE_PATH_MAP=(
             ["langfuse"]="src/services/langfuse"
             ["llm"]="src/services/llm"
-          
           )
-
-          # List of all available services
-
-          SERVICES=("langfuse" "llm" )
-
-          # If user selected a specific servic
-
+          SERVICES=("langfuse" "llm")
           if [ -n "$INPUT_SERVICE" ]; then
-
-          # Check if the entered service name is valid
-
-          if [[ -z "${SERVICE_PATH_MAP[$INPUT_SERVICE]}" ]]; then
-           echo "ERROR: Invalid service name '${INPUT_SERVICE}'."
-            exit 1
-          fi
-            
-          # Build only selected service
-
+            if [[ -z "${SERVICE_PATH_MAP[$INPUT_SERVICE]}" ]]; then
+              echo "ERROR: Invalid service name '${INPUT_SERVICE}'."
+              exit 1
+            fi
             SELECTED="{\"service\": \"${INPUT_SERVICE}\", \"dockerfile\": \"${SERVICE_PATH_MAP[$INPUT_SERVICE]}\"}"
             MATRIX="[${SELECTED}]"
           else
-
-            # Build all services
-
             MATRIX="["
             for service in "${SERVICES[@]}"; do
               path="${SERVICE_PATH_MAP[$service]}"
               if [ -n "$path" ]; then
-              MATRIX="${MATRIX}{\"service\": \"${service}\", \"dockerfile\": \"${path}\"},"
+                MATRIX="${MATRIX}{\"service\": \"${service}\", \"dockerfile\": \"${path}\"},"
               fi
             done
-          
-          # Remove trailing comma
-
             MATRIX="${MATRIX%,}]"
           fi
           echo "Final Matrix JSON: $MATRIX"
-
-          # Export matrix to be used in next job
           printf "matrix=%s\n" "$MATRIX" >> "$GITHUB_OUTPUT"
-
-          # Pass user input as env var
         env:
           INPUT_SERVICE: ${{ github.event.inputs.service }}
 
-  # Second job: Build Docker images for the services from the matrix
   build:
-    needs: determine-services  # Depends on the first job to get the matrix
+    needs: determine-services
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
-
     strategy:
-      # Use the dynamically built matrix of {service, dockerfile}
       matrix: ${{ fromJson(needs.determine-services.outputs.matrix) }}
-
     steps:
-      # Step 1: Checkout the code 
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Step 2:  Log in to Azure Container Registry 
-      - name: Log in to Azure
-        uses: azure/login@v1
+      ### CHANGED FOR GCP: Authenticate to GCP using Service Account key
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
-      - name: Log in to Azure Container Registry (ACR)
-        run: az acr login --name ${{ secrets.AZURE_REGISTRY_NAME }}
-        
+      ### CHANGED FOR GCP: Setup gcloud CLI
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      # Step 4: Build and push the Docker image using the mapped Dockerfile path
-      - name: Build and push image
+      ### CHANGED FOR GCP: Configure Docker for Artifact Registry
+      - name: Configure Docker for GCP Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
+
+      - name: Build and push image to Artifact Registry
         run: |
           set -e
+          IMAGE_NAME=${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_REPOSITORY }}/amicovered-${{ matrix.service }}
 
-          # Construct the full image name for ACR & Make IMAGE_NAME dynamic per service
-          IMAGE_NAME=${{ secrets.AZURE_REGISTRY_NAME }}.azurecr.io/amicovered-${{ matrix.service }}
-
-
-          # Get last commit message affecting the Dockerfile's directory
           COMMIT_MSG=$(git log -1 --pretty=%s -- $(dirname "${{ matrix.dockerfile }}"))
-
-          # Clean and convert commit message to be Docker tag-safe
           TAG=$(echo "$COMMIT_MSG" | tr ' ' '-' | tr -cd '[:alnum:]-' | cut -c1-50)
-
-           # Add short Git SHA to ensure uniqueness
           if [ -z "$TAG" ]; then
             TAG="build-$(git rev-parse --short HEAD)"
           else
             TAG="$TAG-$(git rev-parse --short HEAD)"
           fi
 
-          # Log what's happening
           echo "Building image: $IMAGE_NAME:$TAG"
-          echo "Using Dockerfile: ${{ matrix.dockerfile }}"
-
-          # Dynamically determine the build context directory = Dockerfile's folder
           BUILD_CONTEXT=$(dirname "${{ matrix.dockerfile }}")
-
-          # Build the Docker image using the mapped Dockerfile path and cleaned tag
           docker build -t $IMAGE_NAME:$TAG -f ${{ matrix.dockerfile }} $BUILD_CONTEXT
-
-          # Push the tagged image to ACR
           docker push $IMAGE_NAME:$TAG
 
       - name: Expose image tag
         id: tag
         run: echo "image_tag=$IMAGE_NAME:$TAG" >> "$GITHUB_OUTPUT"
 
-# Third job: Deploy Created Image to azure Contaainer Apps Envirnomnet 
   deploy:
-    name: Deploy to Azure Container Apps
+    name: Deploy to GCP Cloud Run
     needs: build
     runs-on: ubuntu-latest
     strategy:
-    # Matrix to allow you deploying each built service individually
-    matrix: ${{ fromJson(needs.determine-services.outputs.matrix) }}
-
+      matrix: ${{ fromJson(needs.determine-services.outputs.matrix) }}
     steps:
-      # Step 1: Authenticate with Azure using service principal credentials
-      - name: Azure Login
-        uses: azure/login@v1
+      ### CHANGED FOR GCP: Authenticate again (per job)
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
-      # Step 2: Recompute image tag per service
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
       - name: Recompute image tag
         id: tag
         run: |
           set -e
-          # Construct the full image name dynamically based on the service name
-          IMAGE_NAME=${{ secrets.AZURE_REGISTRY_NAME }}.azurecr.io/amicovered-${{ matrix.service }}
-
-          # Get the last Git commit message that affected the Dockerfile's directory (used for tagging)
+          IMAGE_NAME=${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_REPOSITORY }}/amicovered-${{ matrix.service }}
           COMMIT_MSG=$(git log -1 --pretty=%s -- $(dirname "${{ matrix.dockerfile }}"))
-          
-          # Clean the commit message
           TAG=$(echo "$COMMIT_MSG" | tr ' ' '-' | tr -cd '[:alnum:]-' | cut -c1-50)
-
-          # If the cleaned tag is empty (no commit message), use the Git short SHA
           if [ -z "$TAG" ]; then
             TAG="build-$(git rev-parse --short HEAD)"
           else
-          # Otherwise, append the Git short SHA to ensure uniqueness
             TAG="$TAG-$(git rev-parse --short HEAD)"
           fi
-
-          # Export the final image tag as an environment variable (used later in the deployment step)
           echo "IMAGE_TAG=$IMAGE_NAME:$TAG" >> $GITHUB_ENV
 
-     # Step 3: Deploy the image as an Azure Container App
-      - name: Deploy to Azure Container App
+      ### CHANGED FOR GCP: Deploy to Cloud Run
+      - name: Deploy to Cloud Run
         run: |
           set -e
+          SERVICE_NAME=${{ matrix.service }}
+          echo "Deploying $IMAGE_TAG to Cloud Run as service: $SERVICE_NAME"
 
-          # Define the container app name using the service name
-          CONTAINER_APP_NAME=${{ matrix.service }}
-
-          echo "Deploying $IMAGE_TAG to container app: $CONTAINER_APP_NAME"
-
-          az containerapp up \
-            --name $CONTAINER_APP_NAME \
-            --resource-group rg-cc-aicov-dev-we-01 \
-            --environment cae-managedEnvironment-rgccaicovdevwe0-925f \
+          gcloud run deploy $SERVICE_NAME \
             --image $IMAGE_TAG \
-            --target-port 80 \
-            --ingress external \
-            --registry-server ${{ secrets.AZURE_REGISTRY_NAME }}.azurecr.io \
-            --location "sweden central" \
-            --subscription "sub-cc-am-i-covered-development"
-    
+            --platform managed \
+            --region ${{ secrets.GCP_REGION }} \
+            --allow-unauthenticated \
+            --project ${{ secrets.GCP_PROJECT_ID }}
